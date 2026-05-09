@@ -1,16 +1,16 @@
-program HelloReport;
+program Worker;
 {$MODE TP}
-{ Classic Turbo Pascal style sample - demonstrates that programs written
-  in this idiom 20+ years ago still compile and run unchanged today.
-  Reads configuration from environment variables and prints a report. }
+{ Long-running worker: on each tick, generates a batch of synthetic items
+  and prints a formatted report. Sleeps INTERVAL_SECONDS between ticks
+  and runs until killed (SIGTERM / Ctrl-C). }
 
 uses
   SysUtils;
 
 const
-  AppName    = 'HelloReport';
+  AppName    = 'Worker';
   AppVersion = '1.0';
-  MaxItems   = 16;
+  MaxItems   = 64;
 
 type
   TLogLevel = (llDebug, llInfo, llWarn, llError);
@@ -18,14 +18,6 @@ type
   TItem = record
     Name  : string[32];
     Value : LongInt;
-  end;
-
-  TReport = record
-    Title    : string[64];
-    Greeting : string[64];
-    Level    : TLogLevel;
-    Items    : array[1..MaxItems] of TItem;
-    Count    : Integer;
   end;
 
 function EnvOrDefault(const Key, Default: string): string;
@@ -63,37 +55,17 @@ begin
   end;
 end;
 
-procedure AddItem(var R: TReport; const Name: string; Value: LongInt);
-begin
-  if R.Count >= MaxItems then Exit;
-  Inc(R.Count);
-  R.Items[R.Count].Name  := Name;
-  R.Items[R.Count].Value := Value;
-end;
-
-function SumItems(const R: TReport): LongInt;
-var I: Integer; S: LongInt;
-begin
-  S := 0;
-  for I := 1 to R.Count do S := S + R.Items[I].Value;
-  SumItems := S;
-end;
-
-function MaxItem(const R: TReport): Integer;
-var I, Idx: Integer;
-begin
-  Idx := 1;
-  for I := 2 to R.Count do
-    if R.Items[I].Value > R.Items[Idx].Value then Idx := I;
-  MaxItem := Idx;
-end;
-
 function Repeats(Ch: Char; N: Integer): string;
 var S: string; I: Integer;
 begin
   S := '';
   for I := 1 to N do S := S + Ch;
   Repeats := S;
+end;
+
+function Stamp: string;
+begin
+  Stamp := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now);
 end;
 
 procedure PrintBanner;
@@ -106,55 +78,69 @@ begin
   writeln(Repeats('=', 56));
 end;
 
-procedure PrintReport(const R: TReport);
-var I, Top: Integer;
+procedure RunTick(Tick: LongInt;
+                  const Title, Greeting: string;
+                  Level: TLogLevel;
+                  Count: Integer);
+var
+  Items: array[1..MaxItems] of TItem;
+  I, MaxIdx: Integer;
+  Sum: LongInt;
 begin
-  writeln;
-  writeln('[', LevelLabel(R.Level), '] ', R.Title);
-  writeln(R.Greeting);
-  writeln(Repeats('-', 56));
-  if R.Count = 0 then
-    writeln('  (no items)')
-  else
+  for I := 1 to Count do
   begin
-    for I := 1 to R.Count do
-      writeln('  ', I:2, '. ', R.Items[I].Name:-20, ' = ', R.Items[I].Value:8);
-    Top := MaxItem(R);
-    writeln(Repeats('-', 56));
-    writeln('  Items : ', R.Count);
-    writeln('  Sum   : ', SumItems(R));
-    writeln('  Max   : ', R.Items[Top].Name, ' (', R.Items[Top].Value, ')');
+    Items[I].Name  := 'metric_' + IntToStr(I);
+    Items[I].Value := (Tick * 7 + I * I) * 10;
   end;
+
+  Sum := 0;
+  MaxIdx := 1;
+  for I := 1 to Count do
+  begin
+    Sum := Sum + Items[I].Value;
+    if Items[I].Value > Items[MaxIdx].Value then MaxIdx := I;
+  end;
+
   writeln;
+  writeln('[', LevelLabel(Level), '] ', Stamp, ' tick=', Tick, ' :: ', Title);
+  writeln(Greeting);
+  writeln(Repeats('-', 56));
+  for I := 1 to Count do
+    writeln('  ', I:2, '. ', Items[I].Name:-20, ' = ', Items[I].Value:8);
+  writeln(Repeats('-', 56));
+  writeln('  Items : ', Count);
+  writeln('  Sum   : ', Sum);
+  writeln('  Max   : ', Items[MaxIdx].Name, ' (', Items[MaxIdx].Value, ')');
+  Flush(Output);
 end;
 
 var
-  Report: TReport;
-  Iter, I: LongInt;
+  Title, Greeting: string;
+  Level: TLogLevel;
+  Count: Integer;
+  Interval, Tick: LongInt;
 
 begin
   PrintBanner;
 
-  FillChar(Report, SizeOf(Report), 0);
-  Report.Title    := EnvOrDefault('REPORT_TITLE', 'Daily Run Summary');
-  Report.Greeting := EnvOrDefault('GREETING', 'Hello, World!');
-  Report.Level    := ParseLevel(EnvOrDefault('LOG_LEVEL', 'INFO'));
+  Title    := EnvOrDefault('REPORT_TITLE', 'Daily Run Summary');
+  Greeting := EnvOrDefault('GREETING', 'Hello, World!');
+  Level    := ParseLevel(EnvOrDefault('LOG_LEVEL', 'INFO'));
+  Count    := ToInt(EnvOrDefault('ITEM_COUNT', '5'), 5);
+  Interval := ToInt(EnvOrDefault('INTERVAL_SECONDS', '5'), 5);
 
-  Iter := ToInt(EnvOrDefault('ITEM_COUNT', '5'), 5);
-  if Iter < 1 then Iter := 1;
-  if Iter > MaxItems then Iter := MaxItems;
+  if Count < 1 then Count := 1;
+  if Count > MaxItems then Count := MaxItems;
+  if Interval < 1 then Interval := 1;
 
-  for I := 1 to Iter do
-    AddItem(Report, 'metric_' + IntToStr(I), I * I * 10);
+  writeln('Starting worker loop: every ', Interval, 's, ', Count, ' item(s) per tick.');
+  writeln('Press Ctrl-C to stop.');
 
-  PrintReport(Report);
-
-  if ParamCount > 0 then
+  Tick := 0;
+  while True do
   begin
-    write('Args:');
-    for I := 1 to ParamCount do write(' ', ParamStr(I));
-    writeln;
+    Inc(Tick);
+    RunTick(Tick, Title, Greeting, Level, Count);
+    Sleep(Interval * 1000);
   end;
-
-  writeln('Done.');
 end.
